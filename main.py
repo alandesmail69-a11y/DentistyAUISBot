@@ -2,10 +2,10 @@ import os, io, threading
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-import google.generativeai as genai
 import PyPDF2
+from openai import OpenAI
 
-# ---------- FLASK WEB SERVER (To keep the bot awake) ----------
+# ---------- FLASK WEB SERVER ----------
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -16,8 +16,26 @@ def run_web_server():
     port = int(os.environ.get('PORT', 8080))
     flask_app.run(host='0.0.0.0', port=port)
 
+# ---------- GROQ AI SETUP ----------
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    print("❌ Missing GROQ_API_KEY!")
+    exit(1)
+
+client = OpenAI(
+    api_key=GROQ_API_KEY,
+    base_url="https://api.groq.com/openai/v1"
+)
+
+def ask_groq(prompt):
+    response = client.chat.completions.create(
+        model="mixtral-8x7b-32768",  # You can also use "llama3-70b-8192" or "gemma2-9b-it"
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7
+    )
+    return response.choices[0].message.content
+
 # ---------- COURSES AND LECTURES ----------
-# Add your semesters and courses here
 LECTURES = {
     "1": {
         "name": "Semester 1",
@@ -51,10 +69,8 @@ LECTURES = {
     "11": {"name": "Semester 11", "courses": {}}
 }
 
-# Store combined text from all PDFs
 course_contents = {}
 
-# ---------- LOAD ALL PDFs ----------
 def load_pdfs():
     for sem_id, sem_data in LECTURES.items():
         for course_id, course_data in sem_data.get("courses", {}).items():
@@ -81,15 +97,11 @@ def load_pdfs():
 
 load_pdfs()
 
-# ---------- GET KEYS ----------
+# ---------- GET TELEGRAM TOKEN ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GEMINI_KEY = os.environ.get("GEMINI_KEY")
-if not TOKEN or not GEMINI_KEY:
-    print("❌ Missing TELEGRAM_TOKEN or GEMINI_KEY!")
+if not TOKEN:
+    print("❌ Missing TELEGRAM_TOKEN!")
     exit(1)
-
-genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel('gemini-pro')
 
 # ---------- BOT FUNCTIONS ----------
 async def start(update: Update, context):
@@ -187,17 +199,15 @@ Format: List 5 questions with 4 options each (A, B, C, D) and provide the correc
             prompt = f"""You are a dentistry professor. Based ONLY on this lecture text, answer the student's question clearly.
 Lecture text: {lecture_text}
 Student question: {user_text}"""
-        response = model.generate_content(prompt)
-        await update.message.reply_text(f"🧑‍🏫 *{course_name}*\n\n{response.text}", parse_mode="Markdown")
+        
+        response = ask_groq(prompt)
+        await update.message.reply_text(f"🧑‍🏫 *{course_name}*\n\n{response}", parse_mode="Markdown")
         context.user_data['action'] = 'ask'
     except Exception as e:
         await update.message.reply_text(f"⚠️ AI error: {str(e)}")
 
 def main():
-    # Start web server in background thread (keeps bot awake)
     threading.Thread(target=run_web_server, daemon=True).start()
-    
-    # Start Telegram bot
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_click))
